@@ -1,9 +1,18 @@
+#pragma comment(lib, "crypt32.lib")
+
 #include "keytar.h"
 
 #define UNICODE
 
+#include <iostream>
+#include <fstream>
+
 #include <windows.h>
 #include <wincred.h>
+#include <dpapi.h>
+#include <Wincrypt.h>
+#include <Knownfolders.h>
+#include <shlobj_core.h>
 
 #include "credentials.h"
 
@@ -113,6 +122,21 @@ std::string getErrorMessage(DWORD errorCode) {
   return errMsg;
 }
 
+std::string GetMSALCacheFilePath() {
+  // Get the correct file path to the MSAL cache
+  PWSTR dir;
+  SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &dir);
+
+  auto msal_cache_filename = wideCharToAnsi(dir);
+  LocalFree(dir);
+
+  msal_cache_filename.append("\\");
+  msal_cache_filename.append("msal_cache.dat");
+
+  return msal_cache_filename;
+}
+
+
 KEYTAR_OP_RESULT SetPassword(const std::string& service,
                  const std::string& account,
                  const std::string& password,
@@ -134,6 +158,31 @@ KEYTAR_OP_RESULT SetPassword(const std::string& service,
   cred.CredentialBlobSize = password.size();
   cred.CredentialBlob = (LPBYTE)(password.data());
   cred.Persist = CRED_PERSIST_ENTERPRISE;
+
+  // JDT: let's experiment
+  BYTE contents[3] = {'a', 'b', 'c'};
+  DATA_BLOB in_data_blob = { 3, contents };
+
+  DATA_BLOB out_data_blob;
+
+  ::CryptProtectData(
+    &in_data_blob,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    CRYPTPROTECT_LOCAL_MACHINE,
+    &out_data_blob
+  );
+
+  auto msal_cache_filename = GetMSALCacheFilePath();
+
+  std::ofstream file;
+  file.open(msal_cache_filename, std::ios::out|std::ios::binary);
+  file.write((char *)out_data_blob.pbData, out_data_blob.cbData);
+  file.close();
+
+  //printf("%i\n", out_data_blob.cbData);
 
   bool result = ::CredWrite(&cred, 0);
   delete[] target_name;
@@ -165,6 +214,37 @@ KEYTAR_OP_RESULT GetPassword(const std::string& service,
       *errStr = getErrorMessage(code);
       return FAIL_ERROR;
     }
+  }
+
+  auto msal_cache_filename = GetMSALCacheFilePath();
+  std::ifstream file (msal_cache_filename, std::ios::in|std::ios::binary|std::ios::ate);
+  if (file.is_open()) {
+    std::streampos size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    BYTE *contents = new byte[size];
+
+    file.read((char *)contents, size);
+    file.close();
+
+    DATA_BLOB in_data_blob = { size, contents };
+
+    DATA_BLOB out_data_blob;
+
+    ::CryptUnprotectData(
+      &in_data_blob,
+      NULL,
+      NULL,
+      NULL,
+      NULL,
+      CRYPTPROTECT_LOCAL_MACHINE,
+      &out_data_blob
+    );
+
+    printf("%i\n", out_data_blob.cbData);
+    for (int i = 0; i < out_data_blob.cbData; ++i) {
+      printf("%c", out_data_blob.pbData[i]);
+    }
+    printf("\n");
   }
 
   *password = std::string(reinterpret_cast<char*>(cred->CredentialBlob),
